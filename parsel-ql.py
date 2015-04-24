@@ -14,40 +14,34 @@
 
 from pyparsing import Word, Literal, Group, QuotedString, Suppress, Forward
 from pyparsing import alphas, alphanums, CaselessKeyword, ZeroOrMore
-from pyparsing import Optional, delimitedList, Regex, Empty, OneOrMore
+from pyparsing import Optional, delimitedList, Regex
 
 # Define keywords
-(SELECT, FROM, WHERE, AS, NULL, NOT,AND, OR, DISTINCT,
- ALL) = map(CaselessKeyword, """SELECT, FROM, WHERE, AS,
- NULL, NOT, AND, OR, DISTINCT, ALL""".replace(",","").split())
+(SELECT, FROM, WHERE, AS, NULL, NOT,AND, OR, DISTINCT, ALL, INSERT, INTO,
+ VALUES, DELETE, UPDATE, SET, CREATE, INDEX, USING, BTREE, HASH,
+ ON, INTEGER, FLOAT, DATETIME, DATE, VARCHAR, CHAR, TABLE, DATABASE,
+ DROP) = map(CaselessKeyword, """SELECT, FROM, WHERE, AS, NULL, NOT, AND,
+ OR, DISTINCT, ALL, INSERT, INTO, VALUES, DELETE, UPDATE, SET, CREATE,
+ INDEX, USING, BTREE, HASH, ON, INTEGER, FLOAT, DATETIME, DATE, VARCHAR,
+ CHAR, TABLE, DATABASE, DROP""".replace(",","").split())
 
-keywords = (SELECT|FROM|WHERE|AS|NULL|NOT|AND|OR|DISTINCT|ALL)
+keywords = (SELECT|FROM|WHERE|AS|NULL|NOT|AND|OR|DISTINCT|ALL|INSERT|INTO|
+            VALUES|DELETE|UPDATE|SET|CREATE|INDEX|USING|BTREE|HASH|ON|
+            INTEGER|FLOAT|DATETIME|DATE|VARCHAR|CHAR|TABLE|DATABASE|DROP)
 
-# Define and remove dot from the outputs
-LPAR,RPAR = map(Suppress, '()')
+# Define basic symbols
+LPAR, RPAR = map(Suppress, '()')
 dot = Literal(".").suppress()
 comma = Literal(",").suppress()
+semi_colon  = Literal(";").suppress()
 
 # Basic identifier used to define vars, tables, columns
 identifier = ~keywords + Word(alphas, alphanums + '_')
-alias = identifier.copy().setResultsName('alias')
 
-# Table
-simple_table_name = identifier.setResultsName("table_name")
-table_name = simple_table_name.copy()
-
-# Column
-simple_column_name = identifier.setResultsName("column_name")
-fully_qualified_column_name = Group(simple_table_name + dot + simple_column_name)
-column_name = fully_qualified_column_name | simple_column_name
-
-# From-clause
-# bnf-from_table = table ( (AS){0,1} alias)*
-from_table = Group(table_name + Optional(Optional(AS) + alias))
-from_table = from_table.setResultsName("from_table")
-from_tables = delimitedList(from_table)  # tbl1 as t, tbl2 as b,...
-from_tables = from_tables.setResultsName("from_tables")
-from_clause = Group(FROM + from_tables).setResultsName("from_clause")
+# Create and drop database Statements
+database_name = identifier.setResultsName('db_name')
+create_database_stmt = CREATE + DATABASE + database_name
+drop_db_stmt = DROP + DATABASE + database_name
 
 # Literal Values
 nonzero_digits = Word('123456789')
@@ -60,7 +54,28 @@ string_literal = QuotedString("'")
 literal_value = (numeric_literal|string_literal|NULL)
 literal_value = literal_value.setName('literal_value')
 
-# Boolean and Arithmetic expression:
+# Data-types
+integer_type = INTEGER
+float_type = FLOAT
+datetime_type = DATETIME
+date_type = DATE
+string_size = integer_literal.setResultsName('size')
+nvarchar_type = Group(VARCHAR + LPAR + string_size + RPAR)
+nchar_type = Group(CHAR + LPAR + string_size + RPAR)
+data_type = (integer_type|float_type|datetime_type|
+             date_type|nvarchar_type|nchar_type).setResultsName('data_type')
+
+# Table
+alias = identifier.copy().setResultsName('alias')
+simple_table_name = identifier.setResultsName("table_name")
+table_name = simple_table_name.copy()
+
+# Column
+simple_column_name = identifier.setResultsName("column_name")
+fully_qualified_column_name = Group(simple_table_name + dot + simple_column_name)
+column_name = fully_qualified_column_name | simple_column_name
+
+# Arithmetic expression:
 # We use the following grammar as a basis:
 #
 #      <b-expression> ::= <b-term> [<orop> <b-term>]*
@@ -129,18 +144,102 @@ relation = Group(arith_expr) + ZeroOrMore(relation_op + Group(arith_expr))
 
 # Define boolean-expression
 bool_factor << relation
-bool_term << (Optional(NOT) + bool_factor +
-              ZeroOrMore(AND + Optional(NOT) + bool_factor))
+bool_term << Optional(NOT) + bool_factor + ZeroOrMore(AND + Optional(NOT) + bool_factor)
 bool_expr << Group(bool_term) + ZeroOrMore(OR + Group(bool_term))
 
 # Where Clause
 where_clause = Group(WHERE + bool_expr).setResultsName("where_clause")
+
+# From-clause
+# bnf-from_table = table ( (AS){0,1} alias)*
+from_table = Group(table_name + Optional(Optional(AS) + alias))
+from_table = from_table.setResultsName("from_table")
+from_tables = delimitedList(from_table)  # tbl1 as t, tbl2 as b,...
+from_tables = from_tables.setResultsName("from_tables")
+from_clause = Group(FROM + from_tables).setResultsName("from_clause")
 
 # Select Statement
 star = Literal("*")
 attribute = star|Group(arith_expr + Optional(AS+alias))
 projected_attrs = delimitedList(attribute)
 projected_attrs = projected_attrs.setResultsName("projected_attributes")
-selectStmt = (SELECT + Optional(DISTINCT|ALL) + projected_attrs +
+select_stmt = (SELECT + Optional(DISTINCT|ALL) + projected_attrs +
               from_clause  +
               Optional(where_clause))
+
+# Insert statement
+# Contrary to standard SQL, our implementation of the Insert-Statement does not
+# consider the list-of-columns. To reduce the complexity of the execution of an
+# Insert-Stmt, pysilik supports only literals (not arith-expression) in the list
+# of values.
+#
+# <insert> := INSERT INTO <table> VALUES(literal [, literal]*)
+insert_stmt = (INSERT + INTO + table_name + VALUES +
+              LPAR +
+              delimitedList(literal_value).setResultsName('list_values') +
+              RPAR)
+
+# Delete Statement
+delete_stmt = (DELETE + FROM +table_name + Optional(where_clause))
+
+# Update Statement
+# Similar to the insert-stmt, pysilik only supports literal as values
+column_and_value = Group(simple_column_name + equal_op + literal_value)
+set_col_values = delimitedList(column_and_value)
+update_stmt = (UPDATE + table_name +
+              SET + set_col_values.setResultsName('list_columns_and_values') +
+              Optional(where_clause))
+
+# Create-Index Statement
+# <create-index> := CREATE INDEX <index-name>
+#                   ON <table-name> (list-columns)
+#                   USING {BTREE|HASH}
+index_name = identifier.setResultsName('index_name')
+index_type = (BTREE|HASH).setResultsName('index_type')
+index_columns =  (LPAR +
+                  delimitedList(simple_column_name) +
+                  RPAR)
+index_columns = index_columns.setResultsName('list_index_columns')
+create_index_stmt = (CREATE + INDEX + index_name + ON + simple_table_name +
+                     index_columns +
+                     USING + index_type)
+
+# Create-Table Statement
+# <create-table> := CREATE TABLE <table-name> (
+#                       <column-definitions>
+#                       [, <column-definitions>]*
+#                       [, INDEX (<list-columns>) USING <index-type>]
+#                   )
+#  <column-def>  := <column> <data_type> + Optional(NULL|NOT_NULL)
+null_constrain = (Group(NOT+NULL)| NULL).setResultsName('null_constrain')
+column_definition = (simple_column_name +
+                     data_type +
+                     Optional(null_constrain))
+list_col_defs  = delimitedList(Group(column_definition))
+index_definition = INDEX +  index_columns + USING + index_type
+create_table_stmt = (CREATE + TABLE + table_name + LPAR +
+                     list_col_defs.setResultsName('list_column_defs') +
+                     Optional(comma + index_definition) +
+                     RPAR)
+
+# Drop table statement
+# Only one table at a time
+drop_table_stmt = DROP + TABLE + table_name
+
+# SQL =
+sql_stmt = (create_database_stmt|drop_db_stmt|
+            select_stmt|insert_stmt|delete_stmt|
+            update_stmt|create_index_stmt|
+            create_table_stmt|drop_table_stmt) + semi_colon
+
+# The following commands will not be implemented in the parser
+# but in the console
+#
+# \h or \help       : help
+# \sd               : show all databases
+# \u <db-name>      : connect to a database
+# \st               : show all user-tables in the db
+# \si               : show all user-indices
+# \si <idx-name>    : show an index
+# \dt <table-name>  : describe a table
+
